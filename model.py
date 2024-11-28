@@ -26,12 +26,27 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class CausalSelfAttention(nn.Module):
+class PostAttentionCompressor(nn.Module): #helps redundancy
+    """
+    Compresses the output of the attention mechanism into a lower-dimensional representation.
+    """
+    def __init__(self, d_model, compression_dim):
+        super().__init__()
+        self.compression = nn.Linear(d_model, compression_dim)
+        self.expansion = nn.Linear(compression_dim, d_model)
+
+    def forward(self, x):
+        compressed = self.compression(x)  # Reduce dimensionality
+        expanded = self.expansion(compressed)  # Restore dimensionality
+        return expanded
+
+class CausalSelfAttention(nn.Module): #attention mechanism
 
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
+        #split input embedding into 3 embeddings (q k v)
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -48,6 +63,8 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+
+        self.compressor = PostAttentionCompressor(config.n_embd, compression_dim=config.n_embd // 2)
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -73,10 +90,12 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
+        y = self.compressor(y)
         return y
 
 class MLP(nn.Module):
-
+    #two-layer feed-forward neural network with a non-linear activation (GELU).
+    #Linear Layers (self.c_fc and self.c_proj): Expand and then reduce the embedding dimension
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
@@ -92,14 +111,15 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-
+    #Represents a single transformer block
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias) #normalize
+        self.attn = CausalSelfAttention(config) #attention
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias) # normalize again
         self.mlp = MLP(config)
 
+    #normalize -> attn -> add result to input (res conn) ->normalize ->mlp -> add result to input (res conn)
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
@@ -114,6 +134,8 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    compression_dim = int(n_embd * 0.5)
+
 
 class GPT(nn.Module):
 
@@ -167,7 +189,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None): # return bpc here
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -178,19 +200,25 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x) #adjust prune %
         x = self.transformer.ln_f(x)
 
+        """
+        https://stats.stackexchange.com/questions/211858/how-to-compute-bits-per-character-bpc
+            bpc is just avg cross entropy with log base 2 (calculated below)
+        """
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            bpc = loss / math.log(2)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
+            bpc = None
 
-        return logits, loss
+        return logits, loss, bpc
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
