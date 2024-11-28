@@ -26,9 +26,9 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class PostAttentionCompressor(nn.Module): #helps redundancy
+class CoolCompressor(nn.Module): #helps redundancy
     """
-    Compresses the output of the attention mechanism into a lower-dimensional representation.
+    Compresses the output of the attention mechanism into a lower-dimensional representation. Prob helps redundancy.
     """
     def __init__(self, d_model, compression_dim):
         super().__init__()
@@ -36,8 +36,8 @@ class PostAttentionCompressor(nn.Module): #helps redundancy
         self.expansion = nn.Linear(compression_dim, d_model)
 
     def forward(self, x):
-        compressed = self.compression(x)  # Reduce dimensionality
-        expanded = self.expansion(compressed)  # Restore dimensionality
+        compressed = self.compression(x)  # reduce dim
+        expanded = self.expansion(compressed)  # get OG dim
         return expanded
 
 class CausalSelfAttention(nn.Module): #attention mechanism
@@ -64,7 +64,8 @@ class CausalSelfAttention(nn.Module): #attention mechanism
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-        self.compressor = PostAttentionCompressor(config.n_embd, compression_dim=config.n_embd // 2)
+        #compressor for attention output to reduce dimensionality
+        self.compressor = CoolCompressor(config.n_embd, compression_dim=config.n_embd // 2)
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -90,7 +91,7 @@ class CausalSelfAttention(nn.Module): #attention mechanism
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        y = self.compressor(y)
+        y = self.compressor(y) #compress after calculate
         return y
 
 class MLP(nn.Module):
@@ -134,7 +135,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    compression_dim = int(n_embd * 0.5)
+    compression_dim = int(n_embd * 0.5) # new dim, compress to half sz
 
 
 class GPT(nn.Module):
