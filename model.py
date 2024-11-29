@@ -28,17 +28,19 @@ class LayerNorm(nn.Module):
 
 class CoolCompressor(nn.Module): #helps redundancy
     """
-    Compresses the output of the attention mechanism into a lower-dimensional representation. Prob helps redundancy.
+    Compresses the output of the attention mechanism
+    into a lower-dimensional representation.
+    Prob helps redundancy.
     """
-    def __init__(self, d_model, compression_dim):
+    def __init__(self, og_dim, compression_dim):
         super().__init__()
-        self.compression = nn.Linear(d_model, compression_dim)
-        self.expansion = nn.Linear(compression_dim, d_model)
+        self.compression = nn.Linear(og_dim, compression_dim)
+        self.expansion = nn.Linear(compression_dim, og_dim)
 
     def forward(self, x):
         compressed = self.compression(x)  # reduce dim
-        expanded = self.expansion(compressed)  # get OG dim
-        return expanded
+        domain_expansion = self.expansion(compressed)  # get OG dim
+        return domain_expansion
 
 class CausalSelfAttention(nn.Module): #attention mechanism
 
